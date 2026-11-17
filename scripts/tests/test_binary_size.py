@@ -252,7 +252,7 @@ class BinarySizeWorkflowTests(unittest.TestCase):
             " || matrix.runner }}",
             workflow,
         )
-        self.assertIn("lane: size-macos-x86_64", workflow)
+        self.assertIn("lane: size-macos-x86-64", workflow)
         self.assertIn("lane: size-macos-aarch64", workflow)
         self.assertIn("uses: ./.github/workflows/darkbloom-route.yml", workflow)
         for name, target, runner in (
