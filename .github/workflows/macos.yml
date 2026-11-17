@@ -152,12 +152,14 @@ jobs:
           log="$RUNNER_TEMP/fx-unit-tests.log"
           zig build test -Doptimize=ReleaseSafe --summary all "${filters[@]}" 2>&1 | tee "$log"
           # A filter that matches no test name still builds, so check that the
-          # main test binary ran at least 90% of what the plan predicts here.
+          # main test binary ran at least 80% of what the plan predicts here.
+          # The plan also counts tests that other test binaries run, such as
+          # the session manager's, so the main binary runs somewhat fewer.
           ran=$({ grep -oE 'run test [0-9]+ pass[^(]*[(][0-9]+ total[)]' "$log" || true; } |
             sed -E 's/.*[(]([0-9]+) total[)]/\1/' | sort -n | tail -1)
           printf 'The main test binary ran %s tests; the plan predicts %s.\n' "${ran:-0}" "$expected"
-          if [ "${ran:-0}" -lt $((expected * 9 / 10)) ]; then
-            printf '::error title=Unit test shard coverage::shard %s ran %s tests, under 90%% of the %s the plan predicts\n' \
+          if [ $(( ${ran:-0} * 10 )) -lt $(( expected * 8 )) ]; then
+            printf '::error title=Unit test shard coverage::shard %s ran %s tests, under 80%% of the %s the plan predicts\n' \
               "$SHARD_NUMBER" "${ran:-0}" "$expected"
             exit 1
           fi
@@ -326,6 +328,13 @@ jobs:
                   [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
                   printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
                   exit 0
+                fi
+                # The build is done, so its upload is too: allow a minute for
+                # the artifact to be listed, then stop waiting.
+                done_at=${done_at:-$SECONDS}
+                if [ $((SECONDS - done_at)) -ge 60 ]; then
+                  printf '::error::The %s job is done but no fx-macos-arm64 artifact is listed.\n' "$build_job"
+                  exit 1
                 fi
                 ;;
               *)
@@ -500,6 +509,13 @@ jobs:
                   [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
                   printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
                   exit 0
+                fi
+                # The build is done, so its upload is too: allow a minute for
+                # the artifact to be listed, then stop waiting.
+                done_at=${done_at:-$SECONDS}
+                if [ $((SECONDS - done_at)) -ge 60 ]; then
+                  printf '::error::The %s job is done but no fx-macos-arm64 artifact is listed.\n' "$build_job"
+                  exit 1
                 fi
                 ;;
               *)

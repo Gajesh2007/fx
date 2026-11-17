@@ -80,7 +80,7 @@ class UnitTestShardsTests(unittest.TestCase):
         self.assertEqual(split.loads, (2, 1, 0))
         self.assertEqual(split.predicted, (2, 3, 0))
         self.assertEqual(split.covered, 3)
-        self.assertEqual(unit_test_shards.check_plan(split), [])
+        self.assertEqual(unit_test_shards.check_plan(split), ["shard 3 has no tests"])
 
     def test_output_is_deterministic(self) -> None:
         self.write("alpha/a.zig", named=2)

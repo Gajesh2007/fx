@@ -196,6 +196,9 @@ def check_plan(plan: Plan) -> List[str]:
     for prefix in plan.prefixes:
         if prefix not in assigned:
             errors.append(f"{prefix} is in no shard")
+    for index, shard in enumerate(plan.shards):
+        if not shard or plan.loads[index] == 0:
+            errors.append(f"shard {index + 1} has no tests")
     mapped: Dict[str, List[str]] = {prefix: [] for prefix in plan.prefixes}
     for source in plan.files:
         best = deepest_prefix(source.namespace, plan.prefixes)
