@@ -95,7 +95,7 @@ jobs:
       lanes: |
         macos-unit macos_arm64 macos-15
         macos-build macos_arm64 macos-15
-        macos-e2e macos_arm64 macos-15 8
+        macos-e2e macos_arm64 macos-15 12
         macos-store-lock macos_arm64 macos-15
 
   unit:
@@ -165,7 +165,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
@@ -224,12 +224,15 @@ jobs:
       - name: Restore E2E dependencies
         run: tar -xzf "$RUNNER_TEMP/fx-e2e-deps/fx-e2e-deps.tar.gz" -C tests/e2e
 
+      # macOS-platform-weights.json splits the slowest files into parts, so 12
+      # shards stay near the average instead of one whole file dominating.
       - name: Run this shard of the macOS platform E2E files
         working-directory: tests/e2e
         shell: bash
         run: |
           bun ci-shards.ts --shard-count "$SHARD_COUNT" --shard-index "$((SHARD_NUMBER - 1))" \
-            --only macos-platform-tests.json > "$RUNNER_TEMP/fx-macos-shard.txt"
+            --only macos-platform-tests.json --weights macos-platform-weights.json \
+            > "$RUNNER_TEMP/fx-macos-shard.txt"
           files=()
           while IFS= read -r test_file; do
             files+=("$test_file")
