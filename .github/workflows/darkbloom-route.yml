@@ -214,13 +214,14 @@ jobs:
                 without_token=" No OIDC token could be requested ($token_error): a private repository's lanes keep their fallback runners."
               fi
             fi
-            # Up to five attempts after a transport failure, timeout or
-            # transient status, each bounded to 5 seconds, with 2, 4, 8 and 16
-            # second pauses (longer when the plane's Retry-After asks, up to
-            # 16). A retried request for the same run attempt is idempotent:
-            # the plane answers with the route it stored.
+            # Up to nine attempts after a transport failure, timeout or
+            # transient status, each bounded to 5 seconds, with pauses of 2, 4
+            # and 8 seconds and then 15 (or the plane's Retry-After, up to 15),
+            # plus up to 2 seconds of jitter: about two minutes in all, inside
+            # the job's three. A retried request for the same run attempt is
+            # idempotent: the plane answers with the route it stored.
             retry_after=""
-            for attempt in 1 2 3 4 5; do
+            for attempt in 1 2 3 4 5 6 7 8 9; do
               : > "$body"
               : > "$response_headers"
               status=$(curl --disable --silent --show-error --proto '=https' --max-time 5 \
@@ -253,12 +254,12 @@ jobs:
               fi
               case $status in
                 000|408|429|5??)
-                  if [ "$attempt" != 5 ]; then
-                    pause=$((1 << attempt))
+                  if [ "$attempt" != 9 ]; then
+                    pause=$(( attempt < 4 ? 1 << attempt : 15 ))
                     if [ -n "$retry_after" ] && [ "$retry_after" -gt "$pause" ]; then
-                      pause=$(( retry_after < 16 ? retry_after : 16 ))
+                      pause=$(( retry_after < 15 ? retry_after : 15 ))
                     fi
-                    sleep "$pause"
+                    sleep $(( pause + RANDOM % 3 ))
                   fi
                   ;;
                 *) break ;;
