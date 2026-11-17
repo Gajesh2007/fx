@@ -105,7 +105,7 @@ jobs:
       lanes: |
         macos-unit macos_arm64 macos-15
         macos-build macos_arm64 macos-15
-        macos-e2e macos_arm64 macos-15 2
+        macos-e2e macos_arm64 macos-15 8
         macos-store-lock macos_arm64 macos-15
 
   unit:
@@ -129,7 +129,7 @@ jobs:
         run: python3 -m unittest scripts.tests.test_macos_signing scripts.tests.test_signed_macos -q
 
       - name: Run unit tests
-        run: zig build test -Doptimize=ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe --summary all
 
   build:
     name: macOS arm64 build
@@ -148,7 +148,7 @@ jobs:
       - name: Setup Zig
         uses: ./.github/actions/setup-macos-zig
 
-      # Both E2E shards run this binary on other runners, so build for the
+      # The E2E shards run this binary on other runners, so build for the
       # baseline CPU rather than the build runner's.
       - name: Build
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
@@ -167,7 +167,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    name: macOS arm64 platform E2E (shard ${{ matrix.shard.label }})
+    name: macOS arm64 platform E2E (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [detect, prepare-tools, route, build]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-e2e'] }}
@@ -175,16 +175,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - index: 0
-            label: "1/2"
-          - index: 1
-            label: "2/2"
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
       FX_REQUIRE_TMUX: "1"
-      SHARD_INDEX: ${{ matrix.shard.index }}
+      SHARD_NUMBER: ${{ matrix.shard }}
+      SHARD_COUNT: ${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -241,7 +238,7 @@ jobs:
         working-directory: tests/e2e
         shell: bash
         run: |
-          bun ci-shards.ts --shard-count 2 --shard-index "$SHARD_INDEX" \
+          bun ci-shards.ts --shard-count "$SHARD_COUNT" --shard-index "$((SHARD_NUMBER - 1))" \
             --only macos-platform-tests.json > "$RUNNER_TEMP/fx-macos-shard.txt"
           files=()
           while IFS= read -r test_file; do
@@ -253,13 +250,13 @@ jobs:
           ./ci-run-files.sh "${files[@]}"
 
       - name: Setup Node
-        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard.index == 0
+        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard == 1
         uses: actions/setup-node@v4
         with:
           node-version: "24"
 
       - name: Build and load the native SDK addon
-        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard.index == 0
+        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard == 1
         run: |
           zig build libfx-napi -Dnapi-surface=core -Doptimize=ReleaseSafe
           npm run --prefix sdk test:node-napi
