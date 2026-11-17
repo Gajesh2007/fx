@@ -686,6 +686,8 @@ class MacosSigningWorkflowTests(unittest.TestCase):
                 path.read_text(encoding="utf-8").splitlines(),
                 start=1,
             ):
+                if line.lstrip().startswith("#"):
+                    continue
                 local = re.search(r"uses:\s+\./(\S+)", line)
                 if local:
                     target = REPO_ROOT / local.group(1)
