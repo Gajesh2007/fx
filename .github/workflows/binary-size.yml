@@ -18,9 +18,48 @@ permissions:
   contents: read
 
 jobs:
+  route:
+    name: Route binary size jobs
+    uses: ./.github/workflows/darkbloom-route.yml
+    permissions: {}
+    with:
+      # Pull requests only: a push to main keeps the GitHub runners and the
+      # GitHub cache entry its pull requests restore.
+      require-darkbloom: ${{ vars.DARKBLOOM_REQUIRE == 'on' }}
+      lanes: |
+        size-macos-aarch64 macos_arm64 macos-15 ${{ github.event_name == 'pull_request' && 1 || 0 }}
+        size-macos-x86_64 macos_arm64 macos-15-intel ${{ github.event_name == 'pull_request' && 1 || 0 }}
+
+  prepare-tools:
+    name: Prepare macOS tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read base Zig version
+        id: base-zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(git show "$BASE_SHA:build.zig.zon" | sed -n 's/^ *\.minimum_zig_version = "\([^"]*\)",$/\1/p')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the macOS compilers
+        uses: ./.github/actions/fetch-macos-zig
+        with:
+          versions: "0.17.1 ${{ steps.base-zig.outputs.version }}"
+
   compare:
     name: ReleaseSafe delta (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
+    needs: [route, prepare-tools]
+    runs-on: ${{ matrix.lane && fromJSON(needs.route.outputs.routes)[matrix.lane] || matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -39,11 +78,13 @@ jobs:
           - name: macos-x86_64
             target: x86_64-macos
             runner: macos-15-intel
+            lane: size-macos-x86_64
             section_format: macho
             expected_file: "Mach-O 64-bit executable x86_64"
           - name: macos-aarch64
             target: aarch64-macos
             runner: macos-15
+            lane: size-macos-aarch64
             section_format: macho
             expected_file: "Mach-O 64-bit executable arm64"
     env:
@@ -60,11 +101,17 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Zig
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && runner.os != 'macOS'
         uses: mlugg/setup-zig@v2
         with:
           version: "0.17.1"
           use-cache: false
+
+      - name: Setup Zig (macOS)
+        if: github.event_name == 'pull_request' && runner.os == 'macOS'
+        uses: ./.github/actions/setup-macos-zig
+        with:
+          version: "0.17.1"
 
       - name: Test size reporter
         if: github.event_name == 'pull_request'
@@ -100,7 +147,19 @@ jobs:
         env:
           AI_GATEWAY_API_KEY: ""
           VERCEL_OIDC_TOKEN: ""
-        run: scripts/smoke-binary.sh "$RUNNER_TEMP/fx-binary-size-evidence/head-fx"
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/fx-binary-size-evidence/head-fx"
+          # A Darkbloom macOS runner is arm64 with no Rosetta 2, so the binary
+          # built with -Dtarget=x86_64-macos cannot execute there. Measuring
+          # it does not need it to run.
+          if [ "$(uname -m)" = arm64 ] && [ "$TARGET" = x86_64-macos ] &&
+            ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+            echo "::notice title=x86_64 smoke test skipped::This arm64 runner has no Rosetta 2, so the cross-compiled x86_64 binary cannot run here. The size comparison is unaffected."
+            exit 0
+          fi
+          scripts/smoke-binary.sh "$binary"
 
       # The base commit builds with the Zig version it pins, which differs
       # from this pull request's when the pull request changes the toolchain.
@@ -121,11 +180,17 @@ jobs:
           key: binary-size-base-v1-${{ matrix.target }}-zig-${{ steps.base-zig.outputs.version }}-${{ env.BASE_SHA }}
 
       - name: Setup base Zig
-        if: steps.base-cache.outputs.cache-hit != 'true'
+        if: steps.base-cache.outputs.cache-hit != 'true' && runner.os != 'macOS'
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ steps.base-zig.outputs.version }}
           use-cache: false
+
+      - name: Setup base Zig (macOS)
+        if: steps.base-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        uses: ./.github/actions/setup-macos-zig
+        with:
+          version: ${{ steps.base-zig.outputs.version }}
 
       - name: Build base binary
         if: steps.base-cache.outputs.cache-hit != 'true'
