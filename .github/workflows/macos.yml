@@ -173,9 +173,10 @@ jobs:
       SHARD_NUMBER: ${{ matrix.shard }}
       SHARD_COUNT: ${{ strategy.job-total }}
     steps:
+      # No macOS E2E file reads this checkout's history: the git commands the
+      # tests run target fixture repositories they create.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Download the shared binary
