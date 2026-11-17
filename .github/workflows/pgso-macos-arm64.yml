@@ -78,6 +78,7 @@ jobs:
         with:
           name: fx-macos-e2e-deps
           path: ${{ runner.temp }}/fx-e2e-deps.tar.gz
+          overwrite: true
           retention-days: 1
           if-no-files-found: error
 
