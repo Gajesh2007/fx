@@ -28,7 +28,7 @@ jobs:
       require-darkbloom: ${{ vars.DARKBLOOM_REQUIRE == 'on' }}
       lanes: |
         size-macos-aarch64 macos_arm64 macos-15 ${{ github.event_name == 'pull_request' && 1 || 0 }}
-        size-macos-x86_64 macos_arm64 macos-15-intel ${{ github.event_name == 'pull_request' && 1 || 0 }}
+        size-macos-x86-64 macos_arm64 macos-15-intel ${{ github.event_name == 'pull_request' && 1 || 0 }}
 
   prepare-tools:
     name: Prepare macOS tools
@@ -78,7 +78,7 @@ jobs:
           - name: macos-x86_64
             target: x86_64-macos
             runner: macos-15-intel
-            lane: size-macos-x86_64
+            lane: size-macos-x86-64
             section_format: macho
             expected_file: "Mach-O 64-bit executable x86_64"
           - name: macos-aarch64
