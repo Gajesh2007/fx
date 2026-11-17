@@ -102,6 +102,7 @@ jobs:
     uses: ./.github/workflows/darkbloom-route.yml
     permissions: {}
     with:
+      require-darkbloom: ${{ github.event_name == 'pull_request' }}
       lanes: |
         macos-unit macos_arm64 macos-15
         macos-build macos_arm64 macos-15
