@@ -364,8 +364,18 @@ jobs:
         if: ${{ !startsWith(runner.name, 'darkbloom-') }}
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
-      - name: Use a job keychain
-        uses: ./.github/actions/use-job-keychain
+      # Darkbloom VMs sometimes refuse Keychain writes with
+      # errSecInteractionNotAllowed. Record the session so a failure can be
+      # explained: boot time, input idle time, and screen lock state.
+      - name: Describe the macOS session
+        if: ${{ startsWith(runner.name, 'darkbloom-') }}
+        run: |
+          printf 'booted: %s\n' "$(sysctl -n kern.boottime)"
+          idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+          printf 'input idle: %s s\n' "$(( ${idle_ns:-0} / 1000000000 ))"
+          ioreg -n Root -d1 | grep -E 'CGSSessionScreenIsLocked|kCGSSessionOnConsoleKey|kCGSSessionLoginDoneKey' || echo 'screen lock: not reported'
+          printf 'launchd session: %s\n' "$(launchctl managername 2>/dev/null || echo unknown)"
+          security default-keychain -d user || true
 
       # macOS-platform-weights.json splits the slowest files into parts, so 12
       # shards stay near the average instead of one whole file dominating.
@@ -552,8 +562,18 @@ jobs:
         if: ${{ !startsWith(runner.name, 'darkbloom-') }}
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
-      - name: Use a job keychain
-        uses: ./.github/actions/use-job-keychain
+      # Darkbloom VMs sometimes refuse Keychain writes with
+      # errSecInteractionNotAllowed. Record the session so a failure can be
+      # explained: boot time, input idle time, and screen lock state.
+      - name: Describe the macOS session
+        if: ${{ startsWith(runner.name, 'darkbloom-') }}
+        run: |
+          printf 'booted: %s\n' "$(sysctl -n kern.boottime)"
+          idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+          printf 'input idle: %s s\n' "$(( ${idle_ns:-0} / 1000000000 ))"
+          ioreg -n Root -d1 | grep -E 'CGSSessionScreenIsLocked|kCGSSessionOnConsoleKey|kCGSSessionLoginDoneKey' || echo 'screen lock: not reported'
+          printf 'launchd session: %s\n' "$(launchctl managername 2>/dev/null || echo unknown)"
+          security default-keychain -d user || true
 
       - name: Drive the Keychain store's lock along the model
         run: |
