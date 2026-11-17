@@ -93,10 +93,15 @@ jobs:
     with:
       # DARKBLOOM_REQUIRE=on fails runner selection instead of falling back.
       require-darkbloom: ${{ vars.DARKBLOOM_REQUIRE == 'on' }}
+      # Darkbloom grants each lane's count whole, under a reservation cap that
+      # every repository shares, so a large count can fail the whole run.
+      # Every job of the run carries the same Darkbloom label and is placed
+      # whether or not it holds a reserved unit, so the counts only reserve
+      # room for the first jobs: the build, then two of each matrix.
       lanes: |
-        macos-unit macos_arm64 macos-15 4
         macos-build macos_arm64 macos-15
-        macos-e2e macos_arm64 macos-15 12
+        macos-unit macos_arm64 macos-15 2
+        macos-e2e macos_arm64 macos-15 2
         macos-store-lock macos_arm64 macos-15
 
   unit:
