@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildShardPlan, restrictToFiles, selectShard } from "./ci-shards";
+import { buildShardPlan, partPattern, restrictToFiles, selectShard } from "./ci-shards";
 
 const files = ["a.test.ts", "b.test.ts", "c.test.ts", "d.test.ts"];
 
@@ -41,6 +41,103 @@ describe("CI shard planner", () => {
       ],
       totals: [6, 6],
     });
+  });
+
+  test("expands a parted file into named units with ceiling weights", () => {
+    const manifest = [
+      { file: "a.test.ts", weight: 10, parts: 3 },
+      { file: "b.test.ts", weight: 1 },
+    ];
+    const plan = buildShardPlan(["b.test.ts", "a.test.ts"], manifest, 2);
+
+    expect(plan).toEqual({
+      shards: [
+        ["a.test.ts#1/3", "a.test.ts#3/3"],
+        ["a.test.ts#2/3", "b.test.ts"],
+      ],
+      totals: [8, 5],
+    });
+  });
+
+  test("assigns every part of a split file exactly once", () => {
+    const manifest = [
+      { file: "a.test.ts", weight: 9, parts: 4 },
+      { file: "b.test.ts", weight: 6, parts: 2 },
+      { file: "c.test.ts", weight: 3 },
+      { file: "d.test.ts", weight: 2 },
+    ];
+    const expected = [
+      "a.test.ts#1/4", "a.test.ts#2/4", "a.test.ts#3/4", "a.test.ts#4/4",
+      "b.test.ts#1/2", "b.test.ts#2/2",
+      "c.test.ts",
+      "d.test.ts",
+    ].sort();
+
+    for (let shardCount = 2; shardCount <= 4; shardCount += 1) {
+      const plan = buildShardPlan(files, manifest, shardCount);
+      expect(plan.shards.flat().sort()).toEqual(expected);
+      expect(new Set(plan.shards.flat()).size).toBe(expected.length);
+    }
+  });
+
+  test("rejects invalid part counts", () => {
+    for (const parts of [0, 17, -1, 1.5, Number.NaN]) {
+      expect(() => buildShardPlan(files, files.map((file) => ({
+        file,
+        weight: 1,
+        parts: file === "a.test.ts" ? parts : 1,
+      })), 2)).toThrow("parts must be an integer from 1 to 16: a.test.ts");
+    }
+    expect(() => buildShardPlan(files, files.map((file) => ({
+      file,
+      weight: 1,
+      parts: file === "a.test.ts" ? "2" as unknown as number : 1,
+    })), 2)).toThrow("parts must be an integer from 1 to 16: a.test.ts");
+  });
+
+  test("keeps whole files bare when parts is omitted or one", () => {
+    const manifest = files.map((file) => ({ file, weight: 2 }));
+    const explicit = files.map((file) => ({ file, weight: 2, parts: 1 }));
+
+    expect(buildShardPlan(files, explicit, 2)).toEqual(buildShardPlan(files, manifest, 2));
+    expect(buildShardPlan(files, manifest, 2).shards.flat().sort()).toEqual(files);
+  });
+
+  test("part patterns partition varied test names for every part count", () => {
+    const alphabet = ["a", "Z", "0", " ", "-", "$", "^", "#", "/", "\\", "é", "世", "🙂"];
+    let state = 0x5eed;
+    const random = () => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state / 2 ** 32;
+    };
+    const names = ["", " ", "\t", "a", "é", "世", "🙂", "test name with spaces"];
+    while (names.length < 500) {
+      let name = "";
+      const length = Math.floor(random() * 40);
+      for (let index = 0; index < length; index += 1) {
+        name += alphabet[Math.floor(random() * alphabet.length)];
+      }
+      names.push(name);
+    }
+
+    for (let count = 2; count <= 6; count += 1) {
+      const patterns = Array.from({ length: count }, (_, index) => new RegExp(partPattern(index + 1, count)));
+      const failures: string[] = [];
+      for (const name of names) {
+        const matched = patterns.flatMap((pattern, index) => (pattern.test(name) ? [index + 1] : []));
+        const expected = [(name.length % count) + 1];
+        if (matched.join(",") !== expected.join(",")) {
+          failures.push(`${JSON.stringify(name)}: ${matched.join(",")} != ${expected.join(",")}`);
+        }
+      }
+      expect(failures).toEqual([]);
+    }
+  });
+
+  test("rejects impossible part patterns", () => {
+    expect(() => partPattern(0, 4)).toThrow("invalid part: 0/4");
+    expect(() => partPattern(5, 4)).toThrow("invalid part: 5/4");
+    expect(() => partPattern(1.5, 4)).toThrow("invalid part: 1.5/4");
   });
 
   test("rejects missing and stale manifest entries", () => {
@@ -129,6 +226,39 @@ describe("CI shard planner", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("macOS platform E2E weights", () => {
+  const listed = JSON.parse(
+    readFileSync(join(import.meta.dir, "macos-platform-tests.json"), "utf8"),
+  ) as string[];
+  const manifest = JSON.parse(
+    readFileSync(join(import.meta.dir, "macos-platform-weights.json"), "utf8"),
+  ) as { file: string; weight: number; parts?: number }[];
+
+  test("names exactly the macOS platform test files", () => {
+    const names = manifest.map((entry) => entry.file);
+    expect([...names].sort()).toEqual([...listed].sort());
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("carries positive integer weights and valid part counts", () => {
+    for (const entry of manifest) {
+      expect(Number.isSafeInteger(entry.weight) && entry.weight > 0).toBe(true);
+      if (entry.parts !== undefined) {
+        expect(Number.isSafeInteger(entry.parts)).toBe(true);
+        expect(entry.parts).toBeGreaterThanOrEqual(1);
+        expect(entry.parts).toBeLessThanOrEqual(16);
+      }
+    }
+    expect(Object.fromEntries(manifest.map((entry) => [entry.file, entry.parts ?? 1]))).toMatchObject({
+      "sessions.test.ts": 4,
+      "tui-auth-source-selection.test.ts": 4,
+      "tui-resume.test.ts": 3,
+      "gateway-stream-lifecycle.test.ts": 2,
+      "mcp-auth.test.ts": 2,
+    });
   });
 });
 

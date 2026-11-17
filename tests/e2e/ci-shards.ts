@@ -9,7 +9,15 @@ export type ShardPlan = {
 type WeightEntry = {
   file: string;
   weight: number;
+  parts: number;
 };
+
+type Unit = {
+  name: string;
+  weight: number;
+};
+
+const maxParts = 16;
 
 function compareFilenames(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -23,7 +31,7 @@ function parseManifest(value: unknown): WeightEntry[] {
     if (!entry || typeof entry !== "object") {
       throw new Error(`invalid manifest entry at index ${index}`);
     }
-    const { file, weight } = entry as Partial<WeightEntry>;
+    const { file, weight, parts } = entry as Partial<WeightEntry>;
     if (typeof file !== "string" || !/^[^/\r\n]+\.test\.ts$/.test(file)) {
       throw new Error(`invalid manifest filename at index ${index}`);
     }
@@ -34,7 +42,37 @@ function parseManifest(value: unknown): WeightEntry[] {
         weight <= 0) {
       throw new Error(`weight must be a positive integer: ${file}`);
     }
-    return { file, weight };
+    if (parts !== undefined &&
+        (typeof parts !== "number" ||
+         !Number.isSafeInteger(parts) ||
+         parts < 1 ||
+         parts > maxParts)) {
+      throw new Error(`parts must be an integer from 1 to ${maxParts}: ${file}`);
+    }
+    return { file, weight, parts: parts ?? 1 };
+  });
+}
+
+// ci-run-files.sh builds the same pattern in bash: the full test name length
+// is congruent to index1 - 1 modulo count. Keep both constructions in sync.
+export function partPattern(index1: number, count: number): string {
+  if (!Number.isSafeInteger(index1) ||
+      !Number.isSafeInteger(count) ||
+      index1 < 1 ||
+      index1 > count) {
+    throw new Error(`invalid part: ${index1}/${count}`);
+  }
+  return `^(?:[\\s\\S]{${count}})*[\\s\\S]{${index1 - 1}}$`;
+}
+
+function expandUnits(discoveredFiles: string[], manifest: WeightEntry[]): Unit[] {
+  const entries = new Map(manifest.map((entry) => [entry.file, entry]));
+  return discoveredFiles.flatMap((file) => {
+    const entry = entries.get(file)!;
+    return Array.from({ length: entry.parts }, (_, offset) => ({
+      name: entry.parts === 1 ? file : `${file}#${offset + 1}/${entry.parts}`,
+      weight: Math.ceil(entry.weight / entry.parts),
+    }));
   });
 }
 
@@ -68,26 +106,30 @@ export function buildShardPlan(
     .sort(compareFilenames);
   if (stale.length > 0) throw new Error(`stale manifest entry: ${stale[0]}`);
 
-  const ordered = [...manifest].sort((left, right) =>
-    right.weight - left.weight || compareFilenames(left.file, right.file)
+  const expected = expandUnits(discovered, manifest);
+  const expectedNames = expected
+    .map((unit) => unit.name)
+    .sort(compareFilenames);
+  const ordered = [...expected].sort((left, right) =>
+    right.weight - left.weight || compareFilenames(left.name, right.name)
   );
   const shards = Array.from({ length: shardCount }, () => [] as string[]);
   const totals = Array.from({ length: shardCount }, () => 0);
-  for (const entry of ordered) {
+  for (const unit of ordered) {
     let target = 0;
     for (let index = 1; index < shardCount; index += 1) {
       if (totals[index]! < totals[target]!) target = index;
     }
-    shards[target]!.push(entry.file);
-    totals[target]! += entry.weight;
+    shards[target]!.push(unit.name);
+    totals[target]! += unit.weight;
   }
 
   const emptyIndex = shards.findIndex((shard) => shard.length === 0);
   if (emptyIndex >= 0) throw new Error(`shard ${emptyIndex} is empty`);
   const assigned = shards.flat().sort(compareFilenames);
-  if (assigned.length !== discovered.length ||
-      assigned.some((file, index) => file !== discovered[index])) {
-    throw new Error("shard assignment is not the discovered set exactly once");
+  if (assigned.length !== expectedNames.length ||
+      assigned.some((unit, index) => unit !== expectedNames[index])) {
+    throw new Error("shard assignment is not the expected unit set exactly once");
   }
   return { shards, totals };
 }
@@ -141,8 +183,14 @@ function optionalArgument(args: string[], name: string): string | undefined {
 function run(args: string[]): void {
   const shardCount = integerArgument(args, "--shard-count");
   const shardIndex = integerArgument(args, "--shard-index");
+  const weightsPath = optionalArgument(args, "--weights");
   let manifest: unknown = JSON.parse(
-    readFileSync(join(import.meta.dir, "ci-shard-weights.json"), "utf8"),
+    readFileSync(
+      weightsPath === undefined
+        ? join(import.meta.dir, "ci-shard-weights.json")
+        : resolve(import.meta.dir, weightsPath),
+      "utf8",
+    ),
   );
   let discovered = readdirSync(import.meta.dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
