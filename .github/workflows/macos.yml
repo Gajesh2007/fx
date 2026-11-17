@@ -570,7 +570,20 @@ jobs:
         run: |
           set -euo pipefail
           export TLA2TOOLS_JAR="$RUNNER_TEMP/tla2tools.jar"
-          bun test ./tests/tla/drivers/mcp_host/store-lock-budget.test.ts
+          driver=./tests/tla/drivers/mcp_host/store-lock-budget.test.ts
+          if bun test "$driver"; then
+            exit 0
+          fi
+          # On Darkbloom the model sometimes rejects a run's timing
+          # (NoGiveUpOnLiveHolder), which no GitHub-hosted run has done. Retry
+          # once there, as the E2E files are, and keep a pass on retry visible.
+          if [[ ${RUNNER_NAME:-} != darkbloom-* ]]; then
+            exit 1
+          fi
+          printf 'Retrying the store-lock driver once\n'
+          bun test "$driver"
+          printf '::warning title=Store-lock driver passed only on retry::%s\n' \
+            "The model rejected the first run's timing on this Darkbloom VM and accepted the retry."
 
   macos:
     name: macOS arm64
