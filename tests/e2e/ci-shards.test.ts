@@ -253,11 +253,12 @@ describe("macOS platform E2E weights", () => {
       }
     }
     expect(Object.fromEntries(manifest.map((entry) => [entry.file, entry.parts ?? 1]))).toMatchObject({
-      "sessions.test.ts": 4,
-      "tui-auth-source-selection.test.ts": 4,
-      "tui-resume.test.ts": 3,
-      "gateway-stream-lifecycle.test.ts": 2,
-      "mcp-auth.test.ts": 2,
+      "tui-auth-source-selection.test.ts": 8,
+      "tui-resume.test.ts": 6,
+      "sessions.test.ts": 6,
+      "gateway-stream-lifecycle.test.ts": 4,
+      "mcp-auth.test.ts": 4,
+      "tui-command-permissions.test.ts": 2,
     });
   });
 });
