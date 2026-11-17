@@ -64,19 +64,7 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the macOS compiler
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 2 --max-time 90 \
-            https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz \
-            -o "$RUNNER_TEMP/zig.tar.xz"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fx-macos-zig
-          path: ${{ runner.temp }}/zig.tar.xz
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
+        uses: ./.github/actions/fetch-macos-zig
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -102,7 +90,8 @@ jobs:
     uses: ./.github/workflows/darkbloom-route.yml
     permissions: {}
     with:
-      require-darkbloom: ${{ github.event_name == 'pull_request' }}
+      # DARKBLOOM_REQUIRE=on fails runner selection instead of falling back.
+      require-darkbloom: ${{ vars.DARKBLOOM_REQUIRE == 'on' }}
       lanes: |
         macos-unit macos_arm64 macos-15
         macos-build macos_arm64 macos-15
