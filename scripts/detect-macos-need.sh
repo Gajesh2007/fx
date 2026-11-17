@@ -87,7 +87,7 @@ while IFS= read -r path; do
       require_sdk_native "$path: the macOS checks changed" ;;
     scripts/detect-macos-need.sh | scripts/smoke-binary.sh | tests/e2e/ci-run-files.sh | tests/e2e/ci-shards.ts | "$platform_list" | \
       scripts/unit_test_shards.py | tests/e2e/macos-platform-weights.json | .github/workflows/darkbloom-route.yml | \
-      .github/actions/setup-macos-zig/* | .github/actions/fetch-macos-zig/* | .github/actions/use-job-keychain/*)
+      .github/actions/setup-macos-zig/* | .github/actions/fetch-macos-zig/*)
       require "$path: the macOS checks changed" ;;
     build.zig | build.zig.zon)
       require "$path: build configuration changed" ;;
