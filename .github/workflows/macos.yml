@@ -80,6 +80,7 @@ jobs:
         with:
           name: fx-macos-e2e-deps
           path: ${{ runner.temp }}/fx-e2e-deps.tar.gz
+          overwrite: true
           retention-days: 1
           if-no-files-found: error
 
@@ -130,6 +131,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/unit_test_shards.py --check
           filters_file="$RUNNER_TEMP/fx-unit-shard-filters.txt"
           python3 scripts/unit_test_shards.py \
             --count "$SHARD_COUNT" --index "$SHARD_NUMBER" > "$filters_file"
@@ -140,7 +142,20 @@ jobs:
           test "${#filters[@]}" -gt 0
           printf 'Running %s unit test filters:\n' "${#filters[@]}"
           printf '  %s\n' "${filters[@]}"
-          zig build test -Doptimize=ReleaseSafe --summary all "${filters[@]}"
+          expected=$(python3 scripts/unit_test_shards.py --count "$SHARD_COUNT" --json |
+            python3 -c 'import json, os, sys; print(json.load(sys.stdin)["shards"][int(os.environ["SHARD_NUMBER"]) - 1]["predicted_tests"])')
+          log="$RUNNER_TEMP/fx-unit-tests.log"
+          zig build test -Doptimize=ReleaseSafe --summary all "${filters[@]}" 2>&1 | tee "$log"
+          # A filter that matches no test name still builds, so check that the
+          # main test binary ran at least 90% of what the plan predicts here.
+          ran=$({ grep -oE 'run test [0-9]+ pass[^(]*[(][0-9]+ total[)]' "$log" || true; } |
+            sed -E 's/.*[(]([0-9]+) total[)]/\1/' | sort -n | tail -1)
+          printf 'The main test binary ran %s tests; the plan predicts %s.\n' "${ran:-0}" "$expected"
+          if [ "${ran:-0}" -lt $((expected * 9 / 10)) ]; then
+            printf '::error title=Unit test shard coverage::shard %s ran %s tests, under 90%% of the %s the plan predicts\n' \
+              "$SHARD_NUMBER" "${ran:-0}" "$expected"
+            exit 1
+          fi
 
   build:
     name: macOS arm64 build
@@ -174,6 +189,7 @@ jobs:
         with:
           name: fx-macos-arm64
           path: zig-out/bin/fx
+          overwrite: true
           retention-days: 1
           if-no-files-found: error
 
@@ -282,25 +298,36 @@ jobs:
               sys.exit(3)
           for job in jobs:
               if job.get("name") == os.environ["BUILD_JOB"]:
-                  print(job.get("conclusion") or "")
-                  break'
+                  print(job.get("conclusion") or "running")
+                  break
+          else:
+              print("absent")'
           }
 
+          # Only this attempt's successful build counts: a full re-run keeps
+          # the earlier attempt's artifact until its build overwrites it. A
+          # re-run of failed jobs lists only the jobs it re-runs, so a build
+          # absent from this attempt succeeded earlier and its artifact stands.
           while :; do
             # A transient HTTP error only costs this turn of the loop.
-            if body="$(fetch "$artifacts_url")"; then
-              if [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
-                printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
-                exit 0
-              fi
-            fi
+            conclusion=unknown
             if body="$(fetch "$jobs_url")"; then
-              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=""
-              if [ -n "$conclusion" ] && [ "$conclusion" != success ]; then
+              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=unknown
+            fi
+            case "$conclusion" in
+              unknown | running) ;;
+              success | absent)
+                if body="$(fetch "$artifacts_url")" &&
+                  [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
+                  printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
+                  exit 0
+                fi
+                ;;
+              *)
                 printf '::error::The %s job concluded %s, so the fx-macos-arm64 artifact will not arrive.\n' "$build_job" "$conclusion"
                 exit 1
-              fi
-            fi
+                ;;
+            esac
             if [ "$SECONDS" -ge "$deadline" ]; then
               printf '::error::No fx-macos-arm64 artifact after 30 minutes; the %s job did not publish one.\n' "$build_job"
               exit 1
@@ -445,25 +472,36 @@ jobs:
               sys.exit(3)
           for job in jobs:
               if job.get("name") == os.environ["BUILD_JOB"]:
-                  print(job.get("conclusion") or "")
-                  break'
+                  print(job.get("conclusion") or "running")
+                  break
+          else:
+              print("absent")'
           }
 
+          # Only this attempt's successful build counts: a full re-run keeps
+          # the earlier attempt's artifact until its build overwrites it. A
+          # re-run of failed jobs lists only the jobs it re-runs, so a build
+          # absent from this attempt succeeded earlier and its artifact stands.
           while :; do
             # A transient HTTP error only costs this turn of the loop.
-            if body="$(fetch "$artifacts_url")"; then
-              if [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
-                printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
-                exit 0
-              fi
-            fi
+            conclusion=unknown
             if body="$(fetch "$jobs_url")"; then
-              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=""
-              if [ -n "$conclusion" ] && [ "$conclusion" != success ]; then
+              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=unknown
+            fi
+            case "$conclusion" in
+              unknown | running) ;;
+              success | absent)
+                if body="$(fetch "$artifacts_url")" &&
+                  [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
+                  printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
+                  exit 0
+                fi
+                ;;
+              *)
                 printf '::error::The %s job concluded %s, so the fx-macos-arm64 artifact will not arrive.\n' "$build_job" "$conclusion"
                 exit 1
-              fi
-            fi
+                ;;
+            esac
             if [ "$SECONDS" -ge "$deadline" ]; then
               printf '::error::No fx-macos-arm64 artifact after 30 minutes; the %s job did not publish one.\n' "$build_job"
               exit 1

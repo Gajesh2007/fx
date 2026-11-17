@@ -49,8 +49,8 @@ parse_entry() {
 
 run_test() {
   if [ -n "$RUN_PATTERN" ]; then
-    TMUX_TMPDIR="$tmux_dir" bun test --max-concurrency 1 --pass-with-no-tests \
-      -t "$RUN_PATTERN" "./$RUN_FILE"
+    # No --pass-with-no-tests: a part that selects nothing fails loudly.
+    TMUX_TMPDIR="$tmux_dir" bun test --max-concurrency 1 -t "$RUN_PATTERN" "./$RUN_FILE"
   else
     TMUX_TMPDIR="$tmux_dir" bun test --max-concurrency 1 "./$RUN_FILE"
   fi
