@@ -36,8 +36,9 @@ parse_entry() {
       usage
     fi
     RUN_FILE="${BASH_REMATCH[1]}"
-    part="${BASH_REMATCH[2]}"
-    count="${BASH_REMATCH[3]}"
+    # Base 10, so a zero-padded number is not read as octal.
+    part=$((10#${BASH_REMATCH[2]}))
+    count=$((10#${BASH_REMATCH[3]}))
     if (( part < 1 || count < 1 || count > 16 || part > count )); then
       printf 'invalid part suffix (need 1 <= part <= count <= 16): %s\n' "$entry" >&2
       usage
