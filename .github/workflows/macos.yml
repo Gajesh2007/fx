@@ -179,9 +179,12 @@ jobs:
 
   e2e:
     name: macOS arm64 platform E2E (shard ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect, prepare-tools, route, build]
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-e2e'] }}
+    permissions:
+      actions: read
+      contents: read
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -199,15 +202,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - name: Download the shared binary
-        uses: actions/download-artifact@v4
-        with:
-          name: fx-macos-arm64
-          path: zig-out/bin
-
-      - name: Restore the executable bit
-        run: chmod +x zig-out/bin/fx
 
       # Some E2E fixtures build small Zig helpers.
       - name: Setup Zig
@@ -246,6 +240,89 @@ jobs:
       - name: Restore E2E dependencies
         run: tar -xzf "$RUNNER_TEMP/fx-e2e-deps/fx-e2e-deps.tar.gz" -C tests/e2e
 
+      # The build job runs concurrently, so Darkbloom boots this job's VM while
+      # the binary is still building: the boot hides behind the build instead of
+      # starting after it. A fallback runner builds the binary itself rather
+      # than sitting idle.
+      - name: Wait for the build job's binary
+        if: startsWith(runner.name, 'darkbloom-')
+        shell: bash
+        env:
+          FX_ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifacts_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=fx-macos-arm64"
+          jobs_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+          build_job="macOS arm64 build"
+          started=$SECONDS
+          deadline=$((SECONDS + 1800))
+
+          fetch() {
+            curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $FX_ARTIFACT_TOKEN" \
+              "$1"
+          }
+
+          # The artifact count; 0 when the reply is not the JSON we expect.
+          artifact_count() {
+            python3 -c 'import json, sys
+          try:
+              print(int(json.load(sys.stdin).get("total_count") or 0))
+          except Exception:
+              print(0)'
+          }
+
+          # The build job's conclusion, empty while it runs or is not listed.
+          build_conclusion() {
+            BUILD_JOB="$build_job" python3 -c 'import json, os, sys
+          try:
+              jobs = json.load(sys.stdin)["jobs"]
+          except Exception:
+              sys.exit(3)
+          for job in jobs:
+              if job.get("name") == os.environ["BUILD_JOB"]:
+                  print(job.get("conclusion") or "")
+                  break'
+          }
+
+          while :; do
+            # A transient HTTP error only costs this turn of the loop.
+            if body="$(fetch "$artifacts_url")"; then
+              if [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
+                printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
+                exit 0
+              fi
+            fi
+            if body="$(fetch "$jobs_url")"; then
+              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=""
+              if [ -n "$conclusion" ] && [ "$conclusion" != success ]; then
+                printf '::error::The %s job concluded %s, so the fx-macos-arm64 artifact will not arrive.\n' "$build_job" "$conclusion"
+                exit 1
+              fi
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              printf '::error::No fx-macos-arm64 artifact after 30 minutes; the %s job did not publish one.\n' "$build_job"
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Download the shared binary
+        if: startsWith(runner.name, 'darkbloom-')
+        uses: actions/download-artifact@v4
+        with:
+          name: fx-macos-arm64
+          path: zig-out/bin
+
+      - name: Restore the executable bit
+        if: startsWith(runner.name, 'darkbloom-')
+        run: chmod +x zig-out/bin/fx
+
+      - name: Build the binary on this runner
+        if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+
       # macOS-platform-weights.json splits the slowest files into parts, so 12
       # shards stay near the average instead of one whole file dominating.
       - name: Run this shard of the macOS platform E2E files
@@ -282,9 +359,12 @@ jobs:
   # drivers; this one needs the Keychain.
   store-lock:
     name: macOS arm64 MCP store lock driver
-    needs: [detect, prepare-tools, route, build]
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-store-lock'] }}
+    permissions:
+      actions: read
+      contents: read
     timeout-minutes: 30
     env:
       AI_GATEWAY_API_KEY: ""
@@ -293,15 +373,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - name: Download the shared binary
-        uses: actions/download-artifact@v4
-        with:
-          name: fx-macos-arm64
-          path: zig-out/bin
-
-      - name: Restore the executable bit
-        run: chmod +x zig-out/bin/fx
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -325,13 +396,104 @@ jobs:
           printf 'JAVA_HOME=%s\n' "$java_home" >> "$GITHUB_ENV"
           printf '%s\n' "$java_home/bin" >> "$GITHUB_PATH"
 
-      - name: Drive the Keychain store's lock along the model
+      - name: Fetch and verify tla2tools.jar
         run: |
           set -euo pipefail
           jar="$RUNNER_TEMP/tla2tools.jar"
           curl -fsSL -o "$jar" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
           echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $jar" | shasum -a 256 -c -
-          export TLA2TOOLS_JAR="$jar"
+
+      # The build job runs concurrently, so Darkbloom boots this job's VM while
+      # the binary is still building: the boot hides behind the build instead of
+      # starting after it. A fallback runner builds the binary itself rather
+      # than sitting idle.
+      - name: Wait for the build job's binary
+        if: startsWith(runner.name, 'darkbloom-')
+        shell: bash
+        env:
+          FX_ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifacts_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=fx-macos-arm64"
+          jobs_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+          build_job="macOS arm64 build"
+          started=$SECONDS
+          deadline=$((SECONDS + 1800))
+
+          fetch() {
+            curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $FX_ARTIFACT_TOKEN" \
+              "$1"
+          }
+
+          # The artifact count; 0 when the reply is not the JSON we expect.
+          artifact_count() {
+            python3 -c 'import json, sys
+          try:
+              print(int(json.load(sys.stdin).get("total_count") or 0))
+          except Exception:
+              print(0)'
+          }
+
+          # The build job's conclusion, empty while it runs or is not listed.
+          build_conclusion() {
+            BUILD_JOB="$build_job" python3 -c 'import json, os, sys
+          try:
+              jobs = json.load(sys.stdin)["jobs"]
+          except Exception:
+              sys.exit(3)
+          for job in jobs:
+              if job.get("name") == os.environ["BUILD_JOB"]:
+                  print(job.get("conclusion") or "")
+                  break'
+          }
+
+          while :; do
+            # A transient HTTP error only costs this turn of the loop.
+            if body="$(fetch "$artifacts_url")"; then
+              if [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
+                printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
+                exit 0
+              fi
+            fi
+            if body="$(fetch "$jobs_url")"; then
+              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=""
+              if [ -n "$conclusion" ] && [ "$conclusion" != success ]; then
+                printf '::error::The %s job concluded %s, so the fx-macos-arm64 artifact will not arrive.\n' "$build_job" "$conclusion"
+                exit 1
+              fi
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              printf '::error::No fx-macos-arm64 artifact after 30 minutes; the %s job did not publish one.\n' "$build_job"
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Download the shared binary
+        if: startsWith(runner.name, 'darkbloom-')
+        uses: actions/download-artifact@v4
+        with:
+          name: fx-macos-arm64
+          path: zig-out/bin
+
+      - name: Restore the executable bit
+        if: startsWith(runner.name, 'darkbloom-')
+        run: chmod +x zig-out/bin/fx
+
+      - name: Setup Zig
+        if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+        uses: ./.github/actions/setup-macos-zig
+
+      - name: Build the binary on this runner
+        if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+
+      - name: Drive the Keychain store's lock along the model
+        run: |
+          set -euo pipefail
+          export TLA2TOOLS_JAR="$RUNNER_TEMP/tla2tools.jar"
           bun test ./tests/tla/drivers/mcp_host/store-lock-budget.test.ts
 
   macos:
