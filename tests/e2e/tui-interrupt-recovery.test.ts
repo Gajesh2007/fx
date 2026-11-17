@@ -729,7 +729,7 @@ while :; do sleep 1; done
         "file index generation started",
       );
       await session.sendText("/workspace list");
-      await session.waitForText("available=true active=true", TIMEOUT);
+      await session.waitForPane((pane) => /available=true\s+active=true/.test(pane), TIMEOUT);
       expect(countOccurrences(readTrace(tracePath), "file index generation started")).toBe(
         generationStartsBeforeList,
       );
@@ -772,7 +772,7 @@ while :; do sleep 1; done
       // under the row names no command.
       await session.waitForText("● Cancelled ./hold-workspace-cancel.sh", TIMEOUT);
       await session.sendText("/workspace list");
-      await session.waitForText("available=false active=false", TIMEOUT);
+      await session.waitForPane((pane) => /available=false\s+active=false/.test(pane), TIMEOUT);
       expect(countOccurrences(readTrace(tracePath), "file index generation started")).toBe(
         generationStartsBeforeList + 1,
       );
