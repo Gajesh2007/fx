@@ -97,7 +97,8 @@ jobs:
 
   route:
     name: Route macOS jobs
-    needs: prepare-tools
+    needs: detect
+    if: needs.detect.outputs.needed == 'true'
     uses: ./.github/workflows/darkbloom-route.yml
     permissions: {}
     with:
@@ -109,7 +110,7 @@ jobs:
 
   unit:
     name: macOS arm64 unit tests
-    needs: [detect, route]
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-unit'] }}
     timeout-minutes: 60
@@ -132,7 +133,7 @@ jobs:
 
   build:
     name: macOS arm64 build
-    needs: [detect, route]
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-build'] }}
     timeout-minutes: 30
@@ -167,7 +168,7 @@ jobs:
 
   e2e:
     name: macOS arm64 platform E2E (shard ${{ matrix.shard.label }})
-    needs: [detect, route, build]
+    needs: [detect, prepare-tools, route, build]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-e2e'] }}
     timeout-minutes: 60
@@ -269,7 +270,7 @@ jobs:
   # drivers; this one needs the Keychain.
   store-lock:
     name: macOS arm64 MCP store lock driver
-    needs: [detect, route, build]
+    needs: [detect, prepare-tools, route, build]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-store-lock'] }}
     timeout-minutes: 30
@@ -296,11 +297,21 @@ jobs:
           bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip
           no-cache: true
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
+      - name: Set up Temurin 21
+        run: |
+          set -euo pipefail
+          jdk_dir="$RUNNER_TEMP/fx-temurin"
+          mkdir -p "$jdk_dir"
+          curl -fsSL --retry 2 --max-time 120 \
+            https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.13_9.tar.gz \
+            -o "$jdk_dir/jdk.tar.gz"
+          echo 'bf036b35b071bfb2f54f2c0af8ee8d88afa95ee6eb3dce02c0f94cfc2524d04a  jdk.tar.gz' |
+            (cd "$jdk_dir" && shasum -a 256 -c -)
+          tar -xzf "$jdk_dir/jdk.tar.gz" --strip-components=1 -C "$jdk_dir"
+          java_home="$jdk_dir/Contents/Home"
+          "$java_home/bin/java" -version
+          printf 'JAVA_HOME=%s\n' "$java_home" >> "$GITHUB_ENV"
+          printf '%s\n' "$java_home/bin" >> "$GITHUB_PATH"
 
       - name: Drive the Keychain store's lock along the model
         run: |
