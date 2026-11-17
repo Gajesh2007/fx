@@ -93,20 +93,26 @@ jobs:
       # DARKBLOOM_REQUIRE=on fails runner selection instead of falling back.
       require-darkbloom: ${{ vars.DARKBLOOM_REQUIRE == 'on' }}
       lanes: |
-        macos-unit macos_arm64 macos-15
+        macos-unit macos_arm64 macos-15 4
         macos-build macos_arm64 macos-15
         macos-e2e macos_arm64 macos-15 12
         macos-store-lock macos_arm64 macos-15
 
   unit:
-    name: macOS arm64 unit tests
+    name: macOS arm64 unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
     runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-unit'] }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
+      SHARD_NUMBER: ${{ matrix.shard }}
+      SHARD_COUNT: ${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,11 +121,26 @@ jobs:
       - name: Setup Zig
         uses: ./.github/actions/setup-macos-zig
 
+      # Shard 1 also runs the Python checks of the macOS signing scripts.
       - name: Test signing and release routing
+        if: matrix.shard == 1
         run: python3 -m unittest scripts.tests.test_macos_signing scripts.tests.test_signed_macos -q
 
       - name: Run unit tests
-        run: zig build test -Doptimize=ReleaseSafe --summary all
+        shell: bash
+        run: |
+          set -euo pipefail
+          filters_file="$RUNNER_TEMP/fx-unit-shard-filters.txt"
+          python3 scripts/unit_test_shards.py \
+            --count "$SHARD_COUNT" --index "$SHARD_NUMBER" > "$filters_file"
+          filters=()
+          while IFS= read -r filter; do
+            filters+=("$filter")
+          done < "$filters_file"
+          test "${#filters[@]}" -gt 0
+          printf 'Running %s unit test filters:\n' "${#filters[@]}"
+          printf '  %s\n' "${filters[@]}"
+          zig build test -Doptimize=ReleaseSafe --summary all "${filters[@]}"
 
   build:
     name: macOS arm64 build
