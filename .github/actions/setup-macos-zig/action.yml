@@ -1,0 +1,18 @@
+name: Set up macOS Zig
+description: Install the verified macOS compiler prepared by this workflow run
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: fx-macos-zig
+        path: ${{ runner.temp }}/fx-macos-zig
+    - shell: bash
+      run: |
+        set -euo pipefail
+        zig_dir="$RUNNER_TEMP/fx-macos-zig"
+        echo '75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d  zig.tar.xz' |
+          (cd "$zig_dir" && shasum -a 256 -c -)
+        tar -xJf "$zig_dir/zig.tar.xz" --strip-components=1 -C "$zig_dir"
+        "$zig_dir/zig" version
+        printf '%s\n' "$zig_dir" >> "$GITHUB_PATH"
