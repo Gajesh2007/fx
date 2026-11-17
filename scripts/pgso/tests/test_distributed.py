@@ -282,11 +282,16 @@ class WorkflowContractTests(unittest.TestCase):
         )[0]
 
         self.assertIn("  zig:\n", action)
-        for runner_os in ("macOS", "Linux"):
-            self.assertIn(
-                f"if: runner.os == '{runner_os}' && (inputs.zig == 'true' || inputs.llvm == 'true')",
-                action,
-            )
+        self.assertIn(
+            "if: runner.os == 'macOS' && !startsWith(runner.name, 'darkbloom-')"
+            " && (inputs.zig == 'true' || inputs.llvm == 'true')",
+            action,
+        )
+        self.assertIn("uses: ./.github/actions/setup-macos-zig", action)
+        self.assertIn(
+            "if: runner.os == 'Linux' && (inputs.zig == 'true' || inputs.llvm == 'true')",
+            action,
+        )
         self.assertIn('          zig: "true"', behavior_job)
         self.assertNotIn('          llvm: "true"', behavior_job)
 
