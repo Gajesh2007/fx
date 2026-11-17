@@ -52,23 +52,77 @@ jobs:
             scripts/detect-macos-need.sh HEAD^1 HEAD
           fi
 
-  unit:
-    name: macOS arm64 unit tests
+  prepare-tools:
+    name: Prepare macOS tools
     needs: detect
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch the macOS compiler
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 2 --max-time 90 \
+            https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz \
+            -o "$RUNNER_TEMP/zig.tar.xz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fx-macos-zig
+          path: ${{ runner.temp }}/zig.tar.xz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Package the E2E dependencies
+        working-directory: tests/e2e
+        run: |
+          bun install --frozen-lockfile
+          tar -czf "$RUNNER_TEMP/fx-e2e-deps.tar.gz" node_modules
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fx-macos-e2e-deps
+          path: ${{ runner.temp }}/fx-e2e-deps.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  route:
+    name: Route macOS jobs
+    needs: prepare-tools
+    uses: ./.github/workflows/darkbloom-route.yml
+    permissions: {}
+    with:
+      lanes: |
+        macos-unit macos_arm64 macos-15
+        macos-build macos_arm64 macos-15
+        macos-e2e macos_arm64 macos-15 2
+        macos-store-lock macos_arm64 macos-15
+
+  unit:
+    name: macOS arm64 unit tests
+    needs: [detect, route]
+    if: needs.detect.outputs.needed == 'true'
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-unit'] }}
     timeout-minutes: 60
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-          use-cache: false
+        uses: ./.github/actions/setup-macos-zig
 
       - name: Test signing and release routing
         run: python3 -m unittest scripts.tests.test_macos_signing scripts.tests.test_signed_macos -q
@@ -78,21 +132,20 @@ jobs:
 
   build:
     name: macOS arm64 build
-    needs: detect
+    needs: [detect, route]
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-build'] }}
     timeout-minutes: 30
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-          use-cache: false
+        uses: ./.github/actions/setup-macos-zig
 
       # Both E2E shards run this binary on other runners, so build for the
       # baseline CPU rather than the build runner's.
@@ -100,7 +153,9 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
       - name: Smoke test fresh binary
-        run: scripts/smoke-binary.sh zig-out/bin/fx
+        run: |
+          sw_vers
+          scripts/smoke-binary.sh zig-out/bin/fx
 
       - name: Share the binary with the E2E shards
         uses: actions/upload-artifact@v4
@@ -112,9 +167,9 @@ jobs:
 
   e2e:
     name: macOS arm64 platform E2E (shard ${{ matrix.shard.label }})
-    needs: [detect, build]
+    needs: [detect, route, build]
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-e2e'] }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -133,6 +188,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download the shared binary
         uses: actions/download-artifact@v4
@@ -145,26 +201,40 @@ jobs:
 
       # Some E2E fixtures build small Zig helpers.
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-          use-cache: false
+        uses: ./.github/actions/setup-macos-zig
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip
+          no-cache: true
 
       - name: Install E2E system dependencies
         run: |
-          command -v tmux >/dev/null 2>&1 || brew install tmux
+          set -euo pipefail
+          if ! command -v tmux >/dev/null 2>&1; then
+            tools="$RUNNER_TEMP/fx-e2e-tools"
+            mkdir -p "$tools"
+            curl -fsSL --retry 2 \
+              https://github.com/tmux/tmux-builds/releases/download/v3.8/tmux-3.8-macos-arm64.tar.gz \
+              -o "$tools/tmux.tar.gz"
+            echo 'ec926bbf28ddf55d0dc7c9791d43e03e251ddab392d763f7fbb38d4b8408d051  tmux.tar.gz' |
+              (cd "$tools" && shasum -a 256 -c -)
+            tar -xzf "$tools/tmux.tar.gz" -C "$tools"
+            export PATH="$tools:$PATH"
+            printf '%s\n' "$tools" >> "$GITHUB_PATH"
+          fi
           printf 'set-option -g history-limit 100000\n' > "$HOME/.tmux.conf"
           tmux -V
           zsh --version
 
-      - name: Install E2E dependencies
-        run: bun install --frozen-lockfile
-        working-directory: tests/e2e
+      - uses: actions/download-artifact@v4
+        with:
+          name: fx-macos-e2e-deps
+          path: ${{ runner.temp }}/fx-e2e-deps
+
+      - name: Restore E2E dependencies
+        run: tar -xzf "$RUNNER_TEMP/fx-e2e-deps/fx-e2e-deps.tar.gz" -C tests/e2e
 
       - name: Run this shard of the macOS platform E2E files
         working-directory: tests/e2e
@@ -199,15 +269,17 @@ jobs:
   # drivers; this one needs the Keychain.
   store-lock:
     name: macOS arm64 MCP store lock driver
-    needs: [detect, build]
+    needs: [detect, route, build]
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-store-lock'] }}
     timeout-minutes: 30
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download the shared binary
         uses: actions/download-artifact@v4
@@ -221,7 +293,8 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip
+          no-cache: true
 
       - name: Setup Java
         uses: actions/setup-java@v4
