@@ -3,8 +3,8 @@ name: Darkbloom Route
 # Chooses a runner for each lane of a run: a Darkbloom Sandbox when the plane
 # grants one, otherwise the lane's fallback label. Callers run each job on
 # `fromJSON(needs.route.outputs.routes)['<lane>']`. Routing is off unless the
-# repository variable DARKBLOOM_ROUTING is exactly `on`; the plane can never
-# fail this job, and only a malformed `lanes` input does.
+# repository variable DARKBLOOM_ROUTING is exactly `on`. Callers may require
+# Darkbloom for every requested lane.
 #
 # Copy this file into the repository as .github/workflows/darkbloom-route.yml
 # and call it as `uses: ./.github/workflows/darkbloom-route.yml`. Darkbloom's
@@ -33,6 +33,10 @@ on:
           signed sibling; set count and placement before it.
         type: string
         required: true
+      require-darkbloom:
+        description: Fail runner selection if any requested lane would fall back.
+        type: boolean
+        default: false
     outputs:
       routes:
         description: JSON object mapping every lane to its runs-on value.
@@ -52,6 +56,7 @@ jobs:
         env:
           LANES: ${{ inputs.lanes }}
           ROUTING: ${{ vars.DARKBLOOM_ROUTING }}
+          REQUIRE_DARKBLOOM: ${{ inputs.require-darkbloom }}
           PLANE_URL: ${{ vars.DARKBLOOM_SANDBOX_URL }}
           REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
@@ -285,9 +290,6 @@ jobs:
                   else .target = "fallback" | .reason = "plane decision is missing or invalid"
                   end
                 | .runs_on = (if .target == "darkbloom" then $decision.runs_on else .fallback end) ]')
-          routes=$(jq -c 'map({key: .lane, value: .runs_on}) | from_entries' <<<"$decisions")
-          echo "routes=$routes" >> "$GITHUB_OUTPUT"
-
           echo "$note"
           jq -r '.[] | "\(.lane): \(.runs_on | if type == "array" then join(",") else . end) (\(.reason))"' <<<"$decisions"
           {
@@ -299,3 +301,11 @@ jobs:
             echo "| --- | --- | --- | --- | --- |"
             jq -r '.[] | "| `\(.lane)` | \(.profile) | \(.count) | `\(.runs_on | if type == "array" then join(", ") else . end)` | \(.target): \(.reason) |"' <<<"$decisions"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ $REQUIRE_DARKBLOOM == true ]] &&
+            jq -e 'any(.[]; .count > 0 and .target != "darkbloom")' >/dev/null <<<"$decisions"; then
+            echo "::error title=Darkbloom required::At least one requested lane could not use Darkbloom. See the routing summary."
+            exit 1
+          fi
+          routes=$(jq -c 'map({key: .lane, value: .runs_on}) | from_entries' <<<"$decisions")
+          echo "routes=$routes" >> "$GITHUB_OUTPUT"
