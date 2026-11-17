@@ -259,6 +259,8 @@ jobs:
                     if [ -n "$retry_after" ] && [ "$retry_after" -gt "$pause" ]; then
                       pause=$(( retry_after < 15 ? retry_after : 15 ))
                     fi
+                    # Stop retrying in time to fall back inside the job's 3 minutes.
+                    [ $(( SECONDS + pause )) -lt 140 ] || break
                     sleep $(( pause + RANDOM % 3 ))
                   fi
                   ;;
