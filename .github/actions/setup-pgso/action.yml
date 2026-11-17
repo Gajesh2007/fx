@@ -22,10 +22,10 @@ inputs:
 outputs:
   llvm-bin:
     description: Absolute LLVM bin directory
-    value: ${{ steps.llvm.outputs.path || steps.llvm-linux.outputs.path }}
+    value: ${{ steps.llvm.outputs.path || steps.llvm-darkbloom.outputs.path || steps.llvm-linux.outputs.path }}
   bun-bin:
     description: Absolute Bun executable
-    value: ${{ steps.runtime.outputs.bun || steps.runtime-linux.outputs.bun }}
+    value: ${{ steps.runtime.outputs.bun || steps.runtime-darkbloom.outputs.bun || steps.runtime-linux.outputs.bun }}
   hyperfine-bin:
     description: Absolute Hyperfine executable
     value: ${{ steps.hyperfine.outputs.path || steps.hyperfine-linux.outputs.path }}
@@ -33,12 +33,27 @@ outputs:
 runs:
   using: composite
   steps:
+    # The PGSO scripts need Python 3.10 or later. A Darkbloom guest's
+    # python3 is the Command Line Tools' one, but its runner tool cache holds
+    # Python 3.12, which setup-python selects without a download.
+    - name: Setup Python
+      if: runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-')
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
+
     - name: Setup Zig
-      if: runner.os == 'macOS' && (inputs.zig == 'true' || inputs.llvm == 'true')
+      if: runner.os == 'macOS' && !startsWith(runner.name, 'darkbloom-') && (inputs.zig == 'true' || inputs.llvm == 'true')
       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       with:
         version: "0.17.1"
         cache-key: pgso-macos-arm64
+
+    - name: Setup Zig
+      if: runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-') && (inputs.zig == 'true' || inputs.llvm == 'true')
+      uses: ./.github/actions/setup-macos-zig
+      with:
+        version: "0.17.1"
 
     - name: Setup Zig
       if: runner.os == 'Linux' && (inputs.zig == 'true' || inputs.llvm == 'true')
@@ -49,13 +64,56 @@ runs:
 
     - name: Install pinned LLVM
       id: llvm
-      if: runner.os == 'macOS' && inputs.llvm == 'true'
+      if: runner.os == 'macOS' && !startsWith(runner.name, 'darkbloom-') && inputs.llvm == 'true'
       shell: bash
       run: |
         brew install llvm@22
         llvm_bin="$(brew --prefix llvm@22)/bin"
         "$llvm_bin/opt" --version | grep -F "version 22.1.8"
         echo "path=$llvm_bin" >> "$GITHUB_OUTPUT"
+
+    # The macOS release ships no libLLVM.dylib, which scripts/pgso/ir_size.py
+    # loads, so this links one from the release's own static archives. The
+    # release was built with Homebrew zstd and names that builder's archive in
+    # its system libraries; macOS has no libzstd, but the release's own
+    # libclang-cpp.dylib exports the zstd symbols, so this links that instead.
+    - name: Install pinned LLVM
+      id: llvm-darkbloom
+      if: runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-') && inputs.llvm == 'true'
+      shell: bash
+      run: |
+        name=LLVM-22.1.8-macOS-ARM64
+        archive="$RUNNER_TEMP/$name.tar.xz"
+        curl -fsSL --retry 2 \
+          "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$name.tar.xz" \
+          -o "$archive"
+        printf '%s  %s\n' \
+          f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f \
+          "$archive" | shasum -a 256 -c -
+        llvm="$RUNNER_TEMP/llvm"
+        mkdir -p "$llvm"
+        tar -xJf "$archive" -C "$llvm" --strip-components=1
+        rm "$archive"
+        "$llvm/bin/opt" --version | grep -F "version 22.1.8"
+        config="$llvm/bin/llvm-config"
+        read -r -a deps <<<"$("$config" --link-static --libfiles core bitreader bitwriter target)"
+        read -r -a raw_system <<<"$("$config" --link-static --system-libs)"
+        system=()
+        for item in "${raw_system[@]}"; do
+          if [[ "$item" =~ zstd ]]; then
+            continue
+          fi
+          system+=("$item")
+        done
+        "$llvm/bin/clang++" -dynamiclib -o "$llvm/lib/libLLVM.dylib" \
+          -L"$(xcrun --show-sdk-path)/usr/lib" -L"$llvm/lib" -Wl,-rpath,"$llvm/lib" \
+          -Wl,-force_load,"$llvm/lib/libLLVMCore.a" \
+          -Wl,-force_load,"$llvm/lib/libLLVMBitReader.a" \
+          -Wl,-force_load,"$llvm/lib/libLLVMBitWriter.a" \
+          -Wl,-force_load,"$llvm/lib/libLLVMTarget.a" \
+          "${deps[@]}" "${system[@]}" -lclang-cpp
+        python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1]).LLVMParseBitcodeInContext2' "$llvm/lib/libLLVM.dylib"
+        echo "path=$llvm/bin" >> "$GITHUB_OUTPUT"
 
     # The Linux release ships no libLLVM.so, which scripts/pgso/ir_size.py
     # loads, so this links one from the release's own static archives.
@@ -112,17 +170,45 @@ runs:
         echo "path=$llvm/bin" >> "$GITHUB_OUTPUT"
 
     - name: Setup Bun
-      if: inputs.bun == 'true'
+      if: inputs.bun == 'true' && !(runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-'))
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       with:
         bun-version: "1.3.14"
 
+    # A Darkbloom guest reaches only GitHub, and setup-bun's version lookup
+    # also asks registry.npmjs.org, so name the GitHub release asset instead.
+    - name: Setup Bun
+      if: runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-') && inputs.bun == 'true'
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      with:
+        bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip
+        no-cache: true
+
     - name: Install tmux and record Bun
       id: runtime
-      if: runner.os == 'macOS' && inputs.bun == 'true'
+      if: runner.os == 'macOS' && !startsWith(runner.name, 'darkbloom-') && inputs.bun == 'true'
       shell: bash
       run: |
         brew install tmux
+        test "$(bun --version)" = "1.3.14"
+        tmux -V
+        echo "bun=$(which bun)" >> "$GITHUB_OUTPUT"
+
+    - name: Install tmux and record Bun
+      id: runtime-darkbloom
+      if: runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-') && inputs.bun == 'true'
+      shell: bash
+      run: |
+        tools="$RUNNER_TEMP/fx-pgso-tools"
+        mkdir -p "$tools"
+        curl -fsSL --retry 2 \
+          https://github.com/tmux/tmux-builds/releases/download/v3.8/tmux-3.8-macos-arm64.tar.gz \
+          -o "$tools/tmux.tar.gz"
+        echo 'ec926bbf28ddf55d0dc7c9791d43e03e251ddab392d763f7fbb38d4b8408d051  tmux.tar.gz' |
+          (cd "$tools" && shasum -a 256 -c -)
+        tar -xzf "$tools/tmux.tar.gz" -C "$tools"
+        export PATH="$tools:$PATH"
+        printf '%s\n' "$tools" >> "$GITHUB_PATH"
         test "$(bun --version)" = "1.3.14"
         tmux -V
         echo "bun=$(which bun)" >> "$GITHUB_OUTPUT"

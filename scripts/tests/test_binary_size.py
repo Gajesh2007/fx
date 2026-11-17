@@ -245,7 +245,16 @@ class BinarySizeWorkflowTests(unittest.TestCase):
         self.assertIn("pull_request:", workflow)
         self.assertNotIn("pull_request_target", workflow)
         self.assertIn("contents: read", workflow)
-        self.assertIn("runs-on: ${{ matrix.runner }}", workflow)
+        # The macOS rows name a Darkbloom lane: the route job maps it to a
+        # Darkbloom runner or back to the row's own runner.
+        self.assertIn(
+            "runs-on: ${{ matrix.lane && fromJSON(needs.route.outputs.routes)[matrix.lane]"
+            " || matrix.runner }}",
+            workflow,
+        )
+        self.assertIn("lane: size-macos-x86-64", workflow)
+        self.assertIn("lane: size-macos-aarch64", workflow)
+        self.assertIn("uses: ./.github/workflows/darkbloom-route.yml", workflow)
         for name, target, runner in (
             ("linux-x86_64", "x86_64-linux", "ubuntu-24.04"),
             ("linux-aarch64", "aarch64-linux", "ubuntu-24.04-arm"),

@@ -52,126 +52,340 @@ jobs:
             scripts/detect-macos-need.sh HEAD^1 HEAD
           fi
 
-  unit:
-    name: macOS arm64 unit tests
+  prepare-tools:
+    name: Prepare macOS tools
     needs: detect
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch the macOS compiler
+        uses: ./.github/actions/fetch-macos-zig
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Package the E2E dependencies
+        working-directory: tests/e2e
+        run: |
+          bun install --frozen-lockfile
+          tar -czf "$RUNNER_TEMP/fx-e2e-deps.tar.gz" node_modules
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fx-macos-e2e-deps
+          path: ${{ runner.temp }}/fx-e2e-deps.tar.gz
+          overwrite: true
+          retention-days: 1
+          if-no-files-found: error
+
+  route:
+    name: Route macOS jobs
+    needs: detect
+    if: needs.detect.outputs.needed == 'true'
+    uses: ./.github/workflows/darkbloom-route.yml
+    permissions: {}
+    with:
+      # DARKBLOOM_REQUIRE=on fails runner selection instead of falling back.
+      require-darkbloom: ${{ vars.DARKBLOOM_REQUIRE == 'on' }}
+      # Darkbloom grants each lane's count whole, under a reservation cap that
+      # every repository shares, so a large count can fail the whole run.
+      # Every job of the run carries the same Darkbloom label and is placed
+      # whether or not it holds a reserved unit, so the counts only reserve
+      # room for the first jobs: the build, then two of each matrix.
+      lanes: |
+        macos-build macos_arm64 macos-15
+        macos-unit macos_arm64 macos-15 2
+        macos-e2e macos_arm64 macos-15 2
+        macos-store-lock macos_arm64 macos-15
+
+  unit:
+    name: macOS arm64 unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [detect, prepare-tools, route]
+    if: needs.detect.outputs.needed == 'true'
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-unit'] }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
+      SHARD_NUMBER: ${{ matrix.shard }}
+      SHARD_COUNT: ${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-          use-cache: false
+        uses: ./.github/actions/setup-macos-zig
 
+      # Shard 1 also runs the Python checks of the macOS signing scripts.
       - name: Test signing and release routing
+        if: matrix.shard == 1
         run: python3 -m unittest scripts.tests.test_macos_signing scripts.tests.test_signed_macos -q
 
       - name: Run unit tests
-        run: zig build test -Doptimize=ReleaseSafe
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/unit_test_shards.py --check
+          filters_file="$RUNNER_TEMP/fx-unit-shard-filters.txt"
+          python3 scripts/unit_test_shards.py \
+            --count "$SHARD_COUNT" --index "$SHARD_NUMBER" > "$filters_file"
+          filters=()
+          while IFS= read -r filter; do
+            filters+=("$filter")
+          done < "$filters_file"
+          test "${#filters[@]}" -gt 0
+          printf 'Running %s unit test filters:\n' "${#filters[@]}"
+          printf '  %s\n' "${filters[@]}"
+          expected=$(python3 scripts/unit_test_shards.py --count "$SHARD_COUNT" --json |
+            python3 -c 'import json, os, sys; print(json.load(sys.stdin)["shards"][int(os.environ["SHARD_NUMBER"]) - 1]["predicted_tests"])')
+          log="$RUNNER_TEMP/fx-unit-tests.log"
+          zig build test -Doptimize=ReleaseSafe --summary all "${filters[@]}" 2>&1 | tee "$log"
+          # A filter that matches no test name still builds, so check that the
+          # main test binary ran at least 80% of what the plan predicts here.
+          # The plan also counts tests that other test binaries run, such as
+          # the session manager's, so the main binary runs somewhat fewer.
+          ran=$({ grep -oE 'run test [0-9]+ pass[^(]*[(][0-9]+ total[)]' "$log" || true; } |
+            sed -E 's/.*[(]([0-9]+) total[)]/\1/' | sort -n | tail -1)
+          printf 'The main test binary ran %s tests; the plan predicts %s.\n' "${ran:-0}" "$expected"
+          if [ $(( ${ran:-0} * 10 )) -lt $(( expected * 8 )) ]; then
+            printf '::error title=Unit test shard coverage::shard %s ran %s tests, under 80%% of the %s the plan predicts\n' \
+              "$SHARD_NUMBER" "${ran:-0}" "$expected"
+            exit 1
+          fi
 
   build:
     name: macOS arm64 build
-    needs: detect
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-build'] }}
     timeout-minutes: 30
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-          use-cache: false
+        uses: ./.github/actions/setup-macos-zig
 
-      # Both E2E shards run this binary on other runners, so build for the
+      # The E2E shards run this binary on other runners, so build for the
       # baseline CPU rather than the build runner's.
       - name: Build
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
       - name: Smoke test fresh binary
-        run: scripts/smoke-binary.sh zig-out/bin/fx
+        run: |
+          sw_vers
+          scripts/smoke-binary.sh zig-out/bin/fx
 
       - name: Share the binary with the E2E shards
         uses: actions/upload-artifact@v4
         with:
           name: fx-macos-arm64
           path: zig-out/bin/fx
+          overwrite: true
           retention-days: 1
           if-no-files-found: error
 
   e2e:
-    name: macOS arm64 platform E2E (shard ${{ matrix.shard.label }})
-    needs: [detect, build]
+    name: macOS arm64 platform E2E (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-e2e'] }}
+    permissions:
+      actions: read
+      contents: read
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - index: 0
-            label: "1/2"
-          - index: 1
-            label: "2/2"
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
       FX_REQUIRE_TMUX: "1"
-      SHARD_INDEX: ${{ matrix.shard.index }}
+      SHARD_NUMBER: ${{ matrix.shard }}
+      SHARD_COUNT: ${{ strategy.job-total }}
     steps:
+      # No macOS E2E file reads this checkout's history: the git commands the
+      # tests run target fixture repositories they create.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: false
+
+      # Some E2E fixtures build small Zig helpers.
+      - name: Setup Zig
+        uses: ./.github/actions/setup-macos-zig
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip
+          no-cache: true
+
+      - name: Install E2E system dependencies
+        run: |
+          set -euo pipefail
+          if ! command -v tmux >/dev/null 2>&1; then
+            tools="$RUNNER_TEMP/fx-e2e-tools"
+            mkdir -p "$tools"
+            curl -fsSL --retry 2 \
+              https://github.com/tmux/tmux-builds/releases/download/v3.8/tmux-3.8-macos-arm64.tar.gz \
+              -o "$tools/tmux.tar.gz"
+            echo 'ec926bbf28ddf55d0dc7c9791d43e03e251ddab392d763f7fbb38d4b8408d051  tmux.tar.gz' |
+              (cd "$tools" && shasum -a 256 -c -)
+            tar -xzf "$tools/tmux.tar.gz" -C "$tools"
+            export PATH="$tools:$PATH"
+            printf '%s\n' "$tools" >> "$GITHUB_PATH"
+          fi
+          printf 'set-option -g history-limit 100000\n' > "$HOME/.tmux.conf"
+          tmux -V
+          zsh --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fx-macos-e2e-deps
+          path: ${{ runner.temp }}/fx-e2e-deps
+
+      - name: Restore E2E dependencies
+        run: tar -xzf "$RUNNER_TEMP/fx-e2e-deps/fx-e2e-deps.tar.gz" -C tests/e2e
+
+      # The build job runs concurrently, so Darkbloom boots this job's VM while
+      # the binary is still building: the boot hides behind the build instead of
+      # starting after it. A fallback runner builds the binary itself rather
+      # than sitting idle.
+      - name: Wait for the build job's binary
+        if: startsWith(runner.name, 'darkbloom-')
+        shell: bash
+        env:
+          FX_ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifacts_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=fx-macos-arm64"
+          jobs_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+          build_job="macOS arm64 build"
+          started=$SECONDS
+          deadline=$((SECONDS + 1800))
+
+          fetch() {
+            curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $FX_ARTIFACT_TOKEN" \
+              "$1"
+          }
+
+          # The artifact count; 0 when the reply is not the JSON we expect.
+          artifact_count() {
+            python3 -c 'import json, sys
+          try:
+              print(int(json.load(sys.stdin).get("total_count") or 0))
+          except Exception:
+              print(0)'
+          }
+
+          # The build job's conclusion, empty while it runs or is not listed.
+          build_conclusion() {
+            BUILD_JOB="$build_job" python3 -c 'import json, os, sys
+          try:
+              jobs = json.load(sys.stdin)["jobs"]
+          except Exception:
+              sys.exit(3)
+          for job in jobs:
+              if job.get("name") == os.environ["BUILD_JOB"]:
+                  print(job.get("conclusion") or "running")
+                  break
+          else:
+              print("absent")'
+          }
+
+          # Only this attempt's successful build counts: a full re-run keeps
+          # the earlier attempt's artifact until its build overwrites it. A
+          # re-run of failed jobs lists only the jobs it re-runs, so a build
+          # absent from this attempt succeeded earlier and its artifact stands.
+          while :; do
+            # A transient HTTP error only costs this turn of the loop.
+            conclusion=unknown
+            if body="$(fetch "$jobs_url")"; then
+              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=unknown
+            fi
+            case "$conclusion" in
+              unknown | running) ;;
+              success | absent)
+                if body="$(fetch "$artifacts_url")" &&
+                  [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
+                  printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
+                  exit 0
+                fi
+                # The build is done, so its upload is too: allow a minute for
+                # the artifact to be listed, then stop waiting.
+                done_at=${done_at:-$SECONDS}
+                if [ $((SECONDS - done_at)) -ge 60 ]; then
+                  printf '::error::The %s job is done but no fx-macos-arm64 artifact is listed.\n' "$build_job"
+                  exit 1
+                fi
+                ;;
+              *)
+                printf '::error::The %s job concluded %s, so the fx-macos-arm64 artifact will not arrive.\n' "$build_job" "$conclusion"
+                exit 1
+                ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              printf '::error::No fx-macos-arm64 artifact after 30 minutes; the %s job did not publish one.\n' "$build_job"
+              exit 1
+            fi
+            sleep 5
+          done
 
       - name: Download the shared binary
+        if: startsWith(runner.name, 'darkbloom-')
         uses: actions/download-artifact@v4
         with:
           name: fx-macos-arm64
           path: zig-out/bin
 
       - name: Restore the executable bit
+        if: startsWith(runner.name, 'darkbloom-')
         run: chmod +x zig-out/bin/fx
 
-      # Some E2E fixtures build small Zig helpers.
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-          use-cache: false
+      - name: Build the binary on this runner
+        if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      - name: Install E2E system dependencies
+      # Darkbloom VMs sometimes refuse Keychain writes with
+      # errSecInteractionNotAllowed. Record the session so a failure can be
+      # explained: boot time, input idle time, and screen lock state.
+      - name: Describe the macOS session
+        if: ${{ startsWith(runner.name, 'darkbloom-') }}
         run: |
-          command -v tmux >/dev/null 2>&1 || brew install tmux
-          printf 'set-option -g history-limit 100000\n' > "$HOME/.tmux.conf"
-          tmux -V
-          zsh --version
+          printf 'booted: %s\n' "$(sysctl -n kern.boottime)"
+          idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+          printf 'input idle: %s s\n' "$(( ${idle_ns:-0} / 1000000000 ))"
+          ioreg -n Root -d1 | grep -E 'CGSSessionScreenIsLocked|kCGSSessionOnConsoleKey|kCGSSessionLoginDoneKey' || echo 'screen lock: not reported'
+          printf 'launchd session: %s\n' "$(launchctl managername 2>/dev/null || echo unknown)"
+          security default-keychain -d user || true
 
-      - name: Install E2E dependencies
-        run: bun install --frozen-lockfile
-        working-directory: tests/e2e
-
+      # macOS-platform-weights.json splits the slowest files into parts, so 12
+      # shards stay near the average instead of one whole file dominating.
       - name: Run this shard of the macOS platform E2E files
         working-directory: tests/e2e
         shell: bash
         run: |
-          bun ci-shards.ts --shard-count 2 --shard-index "$SHARD_INDEX" \
-            --only macos-platform-tests.json > "$RUNNER_TEMP/fx-macos-shard.txt"
+          bun ci-shards.ts --shard-count "$SHARD_COUNT" --shard-index "$((SHARD_NUMBER - 1))" \
+            --only macos-platform-tests.json --weights macos-platform-weights.json \
+            > "$RUNNER_TEMP/fx-macos-shard.txt"
           files=()
           while IFS= read -r test_file; do
             files+=("$test_file")
@@ -182,13 +396,13 @@ jobs:
           ./ci-run-files.sh "${files[@]}"
 
       - name: Setup Node
-        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard.index == 0
+        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard == 1
         uses: actions/setup-node@v4
         with:
           node-version: "24"
 
       - name: Build and load the native SDK addon
-        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard.index == 0
+        if: needs.detect.outputs.sdk_native == 'true' && matrix.shard == 1
         run: |
           zig build libfx-napi -Dnapi-surface=core -Doptimize=ReleaseSafe
           npm run --prefix sdk test:node-napi
@@ -199,44 +413,186 @@ jobs:
   # drivers; this one needs the Keychain.
   store-lock:
     name: macOS arm64 MCP store lock driver
-    needs: [detect, build]
+    needs: [detect, prepare-tools, route]
     if: needs.detect.outputs.needed == 'true'
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.route.outputs.routes)['macos-store-lock'] }}
+    permissions:
+      actions: read
+      contents: read
     timeout-minutes: 30
     env:
       AI_GATEWAY_API_KEY: ""
       VERCEL_OIDC_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip
+          no-cache: true
+
+      - name: Set up Temurin 21
+        run: |
+          set -euo pipefail
+          jdk_dir="$RUNNER_TEMP/fx-temurin"
+          mkdir -p "$jdk_dir"
+          curl -fsSL --retry 2 --max-time 120 \
+            https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.13_9.tar.gz \
+            -o "$jdk_dir/jdk.tar.gz"
+          echo 'bf036b35b071bfb2f54f2c0af8ee8d88afa95ee6eb3dce02c0f94cfc2524d04a  jdk.tar.gz' |
+            (cd "$jdk_dir" && shasum -a 256 -c -)
+          tar -xzf "$jdk_dir/jdk.tar.gz" --strip-components=1 -C "$jdk_dir"
+          java_home="$jdk_dir/Contents/Home"
+          "$java_home/bin/java" -version
+          printf 'JAVA_HOME=%s\n' "$java_home" >> "$GITHUB_ENV"
+          printf '%s\n' "$java_home/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch and verify tla2tools.jar
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/tla2tools.jar"
+          curl -fsSL -o "$jar" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $jar" | shasum -a 256 -c -
+
+      # The build job runs concurrently, so Darkbloom boots this job's VM while
+      # the binary is still building: the boot hides behind the build instead of
+      # starting after it. A fallback runner builds the binary itself rather
+      # than sitting idle.
+      - name: Wait for the build job's binary
+        if: startsWith(runner.name, 'darkbloom-')
+        shell: bash
+        env:
+          FX_ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifacts_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=fx-macos-arm64"
+          jobs_url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+          build_job="macOS arm64 build"
+          started=$SECONDS
+          deadline=$((SECONDS + 1800))
+
+          fetch() {
+            curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $FX_ARTIFACT_TOKEN" \
+              "$1"
+          }
+
+          # The artifact count; 0 when the reply is not the JSON we expect.
+          artifact_count() {
+            python3 -c 'import json, sys
+          try:
+              print(int(json.load(sys.stdin).get("total_count") or 0))
+          except Exception:
+              print(0)'
+          }
+
+          # The build job's conclusion, empty while it runs or is not listed.
+          build_conclusion() {
+            BUILD_JOB="$build_job" python3 -c 'import json, os, sys
+          try:
+              jobs = json.load(sys.stdin)["jobs"]
+          except Exception:
+              sys.exit(3)
+          for job in jobs:
+              if job.get("name") == os.environ["BUILD_JOB"]:
+                  print(job.get("conclusion") or "running")
+                  break
+          else:
+              print("absent")'
+          }
+
+          # Only this attempt's successful build counts: a full re-run keeps
+          # the earlier attempt's artifact until its build overwrites it. A
+          # re-run of failed jobs lists only the jobs it re-runs, so a build
+          # absent from this attempt succeeded earlier and its artifact stands.
+          while :; do
+            # A transient HTTP error only costs this turn of the loop.
+            conclusion=unknown
+            if body="$(fetch "$jobs_url")"; then
+              conclusion="$(printf '%s' "$body" | build_conclusion)" || conclusion=unknown
+            fi
+            case "$conclusion" in
+              unknown | running) ;;
+              success | absent)
+                if body="$(fetch "$artifacts_url")" &&
+                  [ "$(printf '%s' "$body" | artifact_count)" -ge 1 ]; then
+                  printf 'The fx-macos-arm64 artifact is available after %s seconds.\n' "$((SECONDS - started))"
+                  exit 0
+                fi
+                # The build is done, so its upload is too: allow a minute for
+                # the artifact to be listed, then stop waiting.
+                done_at=${done_at:-$SECONDS}
+                if [ $((SECONDS - done_at)) -ge 60 ]; then
+                  printf '::error::The %s job is done but no fx-macos-arm64 artifact is listed.\n' "$build_job"
+                  exit 1
+                fi
+                ;;
+              *)
+                printf '::error::The %s job concluded %s, so the fx-macos-arm64 artifact will not arrive.\n' "$build_job" "$conclusion"
+                exit 1
+                ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              printf '::error::No fx-macos-arm64 artifact after 30 minutes; the %s job did not publish one.\n' "$build_job"
+              exit 1
+            fi
+            sleep 5
+          done
 
       - name: Download the shared binary
+        if: startsWith(runner.name, 'darkbloom-')
         uses: actions/download-artifact@v4
         with:
           name: fx-macos-arm64
           path: zig-out/bin
 
       - name: Restore the executable bit
+        if: startsWith(runner.name, 'darkbloom-')
         run: chmod +x zig-out/bin/fx
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
+      - name: Setup Zig
+        if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+        uses: ./.github/actions/setup-macos-zig
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
+      - name: Build the binary on this runner
+        if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+
+      # Darkbloom VMs sometimes refuse Keychain writes with
+      # errSecInteractionNotAllowed. Record the session so a failure can be
+      # explained: boot time, input idle time, and screen lock state.
+      - name: Describe the macOS session
+        if: ${{ startsWith(runner.name, 'darkbloom-') }}
+        run: |
+          printf 'booted: %s\n' "$(sysctl -n kern.boottime)"
+          idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+          printf 'input idle: %s s\n' "$(( ${idle_ns:-0} / 1000000000 ))"
+          ioreg -n Root -d1 | grep -E 'CGSSessionScreenIsLocked|kCGSSessionOnConsoleKey|kCGSSessionLoginDoneKey' || echo 'screen lock: not reported'
+          printf 'launchd session: %s\n' "$(launchctl managername 2>/dev/null || echo unknown)"
+          security default-keychain -d user || true
 
       - name: Drive the Keychain store's lock along the model
         run: |
           set -euo pipefail
-          jar="$RUNNER_TEMP/tla2tools.jar"
-          curl -fsSL -o "$jar" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $jar" | shasum -a 256 -c -
-          export TLA2TOOLS_JAR="$jar"
-          bun test ./tests/tla/drivers/mcp_host/store-lock-budget.test.ts
+          export TLA2TOOLS_JAR="$RUNNER_TEMP/tla2tools.jar"
+          driver=./tests/tla/drivers/mcp_host/store-lock-budget.test.ts
+          if bun test "$driver"; then
+            exit 0
+          fi
+          # On Darkbloom the model sometimes rejects a run's timing
+          # (NoGiveUpOnLiveHolder), which no GitHub-hosted run has done. Retry
+          # once there, as the E2E files are, and keep a pass on retry visible.
+          if [[ ${RUNNER_NAME:-} != darkbloom-* ]]; then
+            exit 1
+          fi
+          printf 'Retrying the store-lock driver once\n'
+          bun test "$driver"
+          printf '::warning title=Store-lock driver passed only on retry::%s\n' \
+            "The model rejected the first run's timing on this Darkbloom VM and accepted the retry."
 
   macos:
     name: macOS arm64

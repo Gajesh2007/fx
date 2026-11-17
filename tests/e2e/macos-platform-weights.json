@@ -1,0 +1,19 @@
+[
+  { "file": "tui-auth-source-selection.test.ts", "weight": 659, "parts": 8 },
+  { "file": "tui-resume.test.ts", "weight": 470, "parts": 6 },
+  { "file": "sessions.test.ts", "weight": 456, "parts": 6 },
+  { "file": "gateway-stream-lifecycle.test.ts", "weight": 328, "parts": 4 },
+  { "file": "mcp-auth.test.ts", "weight": 322, "parts": 4 },
+  { "file": "tui-command-permissions.test.ts", "weight": 104, "parts": 2 },
+  { "file": "tui-terminal-tool.test.ts", "weight": 51 },
+  { "file": "vision-route-fake-gateway.test.ts", "weight": 47 },
+  { "file": "tui-full-transcript-brutal.test.ts", "weight": 43 },
+  { "file": "tui-interrupt-recovery.test.ts", "weight": 22 },
+  { "file": "yolo-permission-mode.test.ts", "weight": 20 },
+  { "file": "tui-resume-brutal.test.ts", "weight": 17 },
+  { "file": "tui-slash-extra.test.ts", "weight": 12 },
+  { "file": "cli.test.ts", "weight": 8 },
+  { "file": "tui-performance.test.ts", "weight": 6 },
+  { "file": "file-tool-permissions.test.ts", "weight": 1 },
+  { "file": "oauth-keychain-migration.test.ts", "weight": 1 }
+]

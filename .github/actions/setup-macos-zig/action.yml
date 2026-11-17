@@ -1,0 +1,44 @@
+name: Set up macOS Zig
+description: >-
+  Install Zig on a macOS job. A Darkbloom runner reaches only GitHub, so it
+  installs the verified release that fetch-macos-zig shared in this run. Any
+  other runner installs Zig with mlugg/setup-zig.
+
+inputs:
+  version:
+    description: Zig release version
+    required: false
+    default: "0.17.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Zig with setup-zig
+      if: ${{ !startsWith(runner.name, 'darkbloom-') }}
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      with:
+        version: ${{ inputs.version }}
+        use-cache: false
+
+    - name: Download this run's verified Zig
+      if: ${{ startsWith(runner.name, 'darkbloom-') }}
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: fx-macos-zig
+        path: ${{ runner.temp }}/fx-macos-zig
+
+    - name: Install this run's verified Zig
+      if: ${{ startsWith(runner.name, 'darkbloom-') }}
+      shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        src="$RUNNER_TEMP/fx-macos-zig"
+        file="zig-aarch64-macos-$ZIG_VERSION.tar.xz"
+        grep -F "  $file" "$src/SHA256SUMS" | (cd "$src" && shasum -a 256 -c -)
+        zig_dir="$RUNNER_TEMP/fx-zig-$ZIG_VERSION"
+        mkdir -p "$zig_dir"
+        tar -xJf "$src/$file" --strip-components=1 -C "$zig_dir"
+        test "$("$zig_dir/zig" version)" = "$ZIG_VERSION"
+        printf '%s\n' "$zig_dir" >> "$GITHUB_PATH"

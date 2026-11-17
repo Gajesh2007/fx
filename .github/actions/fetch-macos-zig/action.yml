@@ -1,0 +1,48 @@
+name: Fetch macOS Zig
+description: >-
+  Download the aarch64 macOS Zig releases this run's Darkbloom macOS jobs need,
+  verify them against ziglang.org's release index, and share them as the
+  fx-macos-zig artifact. Darkbloom guests reach only GitHub, so a GitHub-hosted
+  job fetches the compilers for them.
+
+inputs:
+  versions:
+    description: Space-separated Zig release versions
+    required: false
+    default: "0.17.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch and verify the Zig releases
+      shell: bash
+      env:
+        VERSIONS: ${{ inputs.versions }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/fx-macos-zig"
+        index="$RUNNER_TEMP/zig-index.json"
+        mkdir -p "$out"
+        curl -fsSL --retry 3 --max-time 60 https://ziglang.org/download/index.json -o "$index"
+        : > "$out/SHA256SUMS"
+        for version in $(printf '%s\n' $VERSIONS | sort -u); do
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Zig version::$version is not a Zig release version"
+            exit 1
+          fi
+          url=$(jq -er --arg v "$version" '.[$v]["aarch64-macos"].tarball' "$index")
+          sha=$(jq -er --arg v "$version" '.[$v]["aarch64-macos"].shasum' "$index")
+          file="zig-aarch64-macos-$version.tar.xz"
+          curl -fsSL --retry 3 --max-time 180 "$url" -o "$out/$file"
+          printf '%s  %s\n' "$sha" "$file" >> "$out/SHA256SUMS"
+        done
+        (cd "$out" && sha256sum -c SHA256SUMS)
+
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: fx-macos-zig
+        path: ${{ runner.temp }}/fx-macos-zig
+        overwrite: true
+        compression-level: 0
+        retention-days: 1
+        if-no-files-found: error
