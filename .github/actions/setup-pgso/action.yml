@@ -33,6 +33,15 @@ outputs:
 runs:
   using: composite
   steps:
+    # The PGSO scripts need Python 3.10 or later. A Darkbloom guest's
+    # python3 is the Command Line Tools' one, but its runner tool cache holds
+    # Python 3.12, which setup-python selects without a download.
+    - name: Setup Python
+      if: runner.os == 'macOS' && startsWith(runner.name, 'darkbloom-')
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
+
     - name: Setup Zig
       if: runner.os == 'macOS' && !startsWith(runner.name, 'darkbloom-') && (inputs.zig == 'true' || inputs.llvm == 'true')
       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2

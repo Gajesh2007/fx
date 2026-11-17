@@ -529,6 +529,13 @@ jobs:
       - name: Require native arm64 host
         run: test "$(uname -m)" = arm64
 
+      # As in setup-pgso: a Darkbloom guest's python3 predates 3.10.
+      - name: Setup Python
+        if: ${{ startsWith(runner.name, 'darkbloom-') }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
       - name: Download candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
